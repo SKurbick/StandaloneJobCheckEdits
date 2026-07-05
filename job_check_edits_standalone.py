@@ -1736,7 +1736,7 @@ class ServiceGoogleSheet:
                 gs_connect_photo.insert_wild_data_correct_preinsert(data_dict=photos_str_keys, sheet_header="артикул")
 
     async def add_new_data_from_table(self, lk_articles, edit_column_clean=None, only_edits_data=False,
-                                      add_data_in_db=True, check_nm_ids_in_db=True):
+                                      add_data_in_db=True, check_nm_ids_in_db=True, db=None):
         """Функция была изменена. Теперь она просто выдает данные на добавления в таблицу, а не добавляет таблицу внутри функции"""
         wb_api_factory = globals().get("WB_API_FACTORY")
         tokens = get_wb_tokens()
@@ -1903,8 +1903,10 @@ class ServiceGoogleSheet:
 
         if result_nm_ids_data:
             try:
-                async with Database1() as connection:
-                    psql_article = ArticleTable(db=connection)
+                if db is None:
+                    logger.warning("Пропускаем запись новых артикулов в PostgreSQL: db context не передан")
+                else:
+                    psql_article = ArticleTable(db=db)
                     filter_nm_ids = await psql_article.check_nm_ids(account="None", nm_ids=filter_nm_ids_data)
                     if filter_nm_ids:
                         logger.info(f"filter_nm_ids {filter_nm_ids}")
@@ -1915,7 +1917,7 @@ class ServiceGoogleSheet:
 
         return result_nm_ids_data
 
-    async def change_cards_and_tables_data(self, db_nm_ids_data, edit_data_from_table):
+    async def change_cards_and_tables_data(self, db_nm_ids_data, edit_data_from_table, db=None):
         sheet_statuses = ServiceGoogleSheet.check_status()
         net_profit_status = sheet_statuses['Отрицательная \nЧП']
         price_discount_edit_status = sheet_statuses['Цены/Скидки']
@@ -2068,6 +2070,7 @@ class ServiceGoogleSheet:
                 only_edits_data=True,
                 add_data_in_db=False,
                 check_nm_ids_in_db=False,
+                db=db,
             )
             return updated_data, edit_column_clean
 
@@ -2133,6 +2136,7 @@ async def check_edits_columns(db: Database1):
                         service_gs_table.change_cards_and_tables_data(
                             db_nm_ids_data=db_nm_ids_data,
                             edit_data_from_table=edit_data_from_table,
+                            db=db,
                         )
                     )
                     if edit_nm_ids_data:

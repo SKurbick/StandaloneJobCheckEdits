@@ -1,8 +1,11 @@
+version: 3.8
+
 services:
   standalone_job_check_edits:
     build: .
     container_name: standalone_job_check_edits_container
     image: standalone_job_check_edits_image
+    restart: unless-stopped
     env_file:
       - .env
     environment:
@@ -11,4 +14,9 @@ services:
       - ./logging:/app/logging
       - ./creds.json:/app/creds.json:ro
       - ./tokens.json:/app/tokens.json:ro
+    networks:
+      - vector_db_default
 
+networks:
+  vector_db_default:
+    external: true

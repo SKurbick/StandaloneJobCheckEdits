@@ -26,13 +26,13 @@ class Database1:
         self._host = host
         self._port = port
         self._pool = None
-        self._max_size = 15
-        self._min_size = 5
-        self._timeout = 300
-        self._command_timeout = 250
+        self._min_size = db_config.DB_POOL_MIN_SIZE
+        self._max_size = db_config.DB_POOL_MAX_SIZE
+        self._timeout = db_config.DB_CONNECT_TIMEOUT
+        self._command_timeout = db_config.DB_COMMAND_TIMEOUT
 
     async def connect(self):
-        logger.info("Connecting to database...")
+        logger.info("Connecting to database with pool min_size={} max_size={}...", self._min_size, self._max_size)
         self._pool = await asyncpg.create_pool(
             user=self._user,
             password=self._password,

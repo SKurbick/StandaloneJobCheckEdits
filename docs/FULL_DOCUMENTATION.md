@@ -70,6 +70,27 @@ docker compose down
 docker compose up --build -d
 ```
 
+
+## Docker Compose и сеть базы
+
+Standalone compose рассчитан на отдельный запуск сервиса и подключает контейнер к внешней Docker-сети `vector_db_default`:
+
+```yaml
+networks:
+  vector_db_default:
+    external: true
+```
+
+Это повторяет схему старого общего compose, где `VectorProject` был в той же сети с БД. Перед запуском на сервере сеть должна уже существовать:
+
+```bash
+docker network ls | grep vector_db_default
+```
+
+Если PostgreSQL находится в этой сети, в `.env` можно использовать docker-имя сервиса/контейнера базы в `DB_HOST`. Если PostgreSQL доступен по внешнему IP или DNS, укажи этот адрес в `DB_HOST`; подключение к `vector_db_default` при этом не мешает.
+
+Для scheduler-контейнера задано `restart: unless-stopped`, чтобы он поднимался после перезапуска Docker/сервера и после аварийного падения процесса.
+
 ## Расписание
 
 Расписание задано в `scheduler.py`:
@@ -103,6 +124,10 @@ DB_PASSWORD=
 DB_NAME=
 DB_HOST=
 DB_PORT=
+DB_POOL_MIN_SIZE=1
+DB_POOL_MAX_SIZE=3
+DB_CONNECT_TIMEOUT=300
+DB_COMMAND_TIMEOUT=250
 ```
 
 Дополнительные, если используются соответствующие участки legacy-логики:
@@ -125,6 +150,10 @@ PC_SPREADSHEET=
 | `DB_NAME` | Имя базы PostgreSQL. |
 | `DB_HOST` | Хост PostgreSQL. Для Docker часто это имя сервиса/хост в docker network, не `localhost`. |
 | `DB_PORT` | Порт PostgreSQL. |
+| `DB_POOL_MIN_SIZE` | Минимальное число соединений в asyncpg pool. По умолчанию `1`. |
+| `DB_POOL_MAX_SIZE` | Максимальное число соединений в asyncpg pool. По умолчанию `3`. |
+| `DB_CONNECT_TIMEOUT` | Timeout подключения к PostgreSQL. По умолчанию `300`. |
+| `DB_COMMAND_TIMEOUT` | Timeout SQL-команд. По умолчанию `250`. |
 | `PC_SHEET` | Лист для расчетов/плановой себестоимости, если нужен legacy-ветке. |
 | `PC_SPREADSHEET` | Spreadsheet для расчетов/плановой себестоимости, если нужен legacy-ветке. |
 
@@ -172,12 +201,14 @@ volumes:
 
 Подключение создается через `asyncpg.create_pool` в `db.py`.
 
-Текущие параметры pool:
+Текущие параметры pool задаются через `.env` и имеют компактные дефолты для standalone scheduler:
 
-- `min_size=5`
-- `max_size=15`
-- `timeout=300`
-- `command_timeout=250`
+- `DB_POOL_MIN_SIZE=1`
+- `DB_POOL_MAX_SIZE=3`
+- `DB_CONNECT_TIMEOUT=300`
+- `DB_COMMAND_TIMEOUT=250`
+
+Для этого сервиса нет смысла заранее держать 5 соединений: job одна, DB-участки короткие, а основной параллелизм идет во внешние WB/Google API. Если на сервере появится реальная потребность, лимиты можно поднять в `.env` без изменения кода.
 
 Если сервис запускается в Docker, `DB_HOST=localhost` почти всегда неправильный, если база не внутри того же контейнера. Нужно указать доступный контейнеру адрес базы: имя сервиса в общей docker network, IP/host сервера или `host.docker.internal`, если окружение это поддерживает.
 

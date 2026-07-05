@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    return int(value)
+
+
 load_dotenv()
 
 
@@ -26,6 +33,10 @@ class DBConfig:
     DB_NAME: str | None = os.getenv("DB_NAME")
     DB_HOST: str | None = os.getenv("DB_HOST")
     DB_PORT: str | None = os.getenv("DB_PORT")
+    DB_POOL_MIN_SIZE: int = _env_int("DB_POOL_MIN_SIZE", 1)
+    DB_POOL_MAX_SIZE: int = _env_int("DB_POOL_MAX_SIZE", 3)
+    DB_CONNECT_TIMEOUT: int = _env_int("DB_CONNECT_TIMEOUT", 300)
+    DB_COMMAND_TIMEOUT: int = _env_int("DB_COMMAND_TIMEOUT", 250)
 
 
 settings = Settings()
