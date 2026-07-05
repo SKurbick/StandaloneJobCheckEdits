@@ -134,6 +134,7 @@ class ListOfCardsContent(_WBClient):
         updated_at = None
         cursor_nm_id = None
         response_result = None
+        page = 0
 
         while True:
             for _ in range(10):
@@ -143,6 +144,18 @@ class ListOfCardsContent(_WBClient):
                             async with session.post(url, headers=self.headers, json=json_obj) as response:
                                 response_result = await response.json()
                     total = response_result["cursor"]["total"]
+                    page += 1
+                    cursor = response_result.get("cursor", {})
+                    cards_count = len(response_result.get("cards", []))
+                    cursor_nm_id_value = cursor.get("nmID")
+                    cursor_updated_at_value = cursor.get("updatedAt")
+                    self._info(
+                        f"WB async cards table page loaded. account={account} page={page} "
+                        f"cards={cards_count} cursor_total={total} "
+                        f"cursor_nm_id={cursor_nm_id_value} "
+                        f"cursor_updated_at={cursor_updated_at_value} "
+                        f"nm_ids_left_before={len(nm_ids_list_for_edit)}"
+                    )
                     if total == 0:
                         break
                     updated_at = response_result["cursor"]["updatedAt"]
@@ -218,6 +231,7 @@ class ListOfCardsContent(_WBClient):
         updated_at = None
         cursor_nm_id = None
         response_result = None
+        page = 0
 
         while True:
             for _ in range(10):
@@ -227,6 +241,18 @@ class ListOfCardsContent(_WBClient):
                             async with session.post(url, headers=self.headers, json=json_obj) as response:
                                 response_result = await response.json()
                     total = response_result["cursor"]["total"]
+                    page += 1
+                    cursor = response_result.get("cursor", {})
+                    cards_count = len(response_result.get("cards", []))
+                    cursor_nm_id_value = cursor.get("nmID")
+                    cursor_updated_at_value = cursor.get("updatedAt")
+                    self._info(
+                        f"WB async cards table page loaded. account={account} page={page} "
+                        f"cards={cards_count} cursor_total={total} "
+                        f"cursor_nm_id={cursor_nm_id_value} "
+                        f"cursor_updated_at={cursor_updated_at_value} "
+                        f"nm_ids_left_before={len(nm_ids_list_for_edit)}"
+                    )
                     if total == 0:
                         break
                     updated_at = response_result["cursor"]["updatedAt"]
@@ -270,6 +296,13 @@ class ListOfCardsContent(_WBClient):
                 "updatedAt": updated_at,
                 "nmID": cursor_nm_id,
             })
+
+        if nm_ids_list_for_edit:
+            self._warning(
+                f"WB async cards table finished with unresolved nm_ids. account={account} "
+                f"pages={page} unresolved_nm_ids={nm_ids_list_for_edit} "
+                f"found={list(card_result_for_match.keys())}"
+            )
 
         if nm_ids_list_for_edit and not only_edits_data:
             for nm_id in nm_ids_list_for_edit:
