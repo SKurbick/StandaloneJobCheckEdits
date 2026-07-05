@@ -1,0 +1,14 @@
+services:
+  standalone_job_check_edits:
+    build: .
+    container_name: standalone_job_check_edits_container
+    image: standalone_job_check_edits_image
+    env_file:
+      - .env
+    environment:
+      - TZ=Europe/Moscow
+    volumes:
+      - ./logging:/app/logging
+      - ./creds.json:/app/creds.json:ro
+      - ./tokens.json:/app/tokens.json:ro
+

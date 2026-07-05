@@ -1,0 +1,13 @@
+.env
+creds.json
+tokens.json
+logging/
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+.idea/
