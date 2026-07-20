@@ -7,7 +7,6 @@ while new execution code can move here module by module.
 
 import asyncio
 from functools import lru_cache
-from pprint import pprint
 
 if __package__:
     from .config import settings
@@ -54,7 +53,6 @@ async def _job_impl():
             )
             logger.info("Запуск : Смотрит в таблицу, оценивает изменения")
             result = await legacy.check_edits_columns(db=db)
-            pprint(result)
             if result:
                 logger.info("Завершение : Внесение изменений в таблицу")
                 await service.actualize_card_data_in_db(result, db=db)

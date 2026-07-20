@@ -90,9 +90,13 @@ class GoogleSheet:
         client = self.client_init_json()
         for _ in range(10):
             try:
-                print(sheet, "sheet")
                 spreadsheet = client.open(self.spreadsheet)
                 self.sheet = spreadsheet.worksheet(sheet)
+                logger.info(
+                    "Подключение к Google-таблице '{}' (лист '{}')",
+                    self.spreadsheet,
+                    sheet,
+                )
                 break
             except (gspread.exceptions.APIError, requests.exceptions.ConnectionError) as e:
                 logger.error(e)
@@ -295,7 +299,6 @@ class GoogleSheet:
             for idx, header in enumerate(headers):
                 if sheet_header in header.lower():
                     wild_col_idx = idx
-                    print(wild_col_idx)
 
             if wild_col_idx is None:
                 logger.error(f"Колонка {sheet_header} не найдена в таблице")
@@ -304,7 +307,6 @@ class GoogleSheet:
             # Находим индексы и диапазон наших целевых колонок
             # target_headers = list(next(iter(data_dict.values())).keys()) if data_dict else []
             target_headers = list(set().union(*(item.keys() for item in data_dict.values())))
-            print(f"Все целевые заголовки: {target_headers}")
 
             target_indices = []
 
@@ -413,7 +415,7 @@ class GoogleSheet:
             logger.error(f"Ошибка при вставке данных: {e}")
             raise
 
-    def update_rows(self, data_json, edit_column_clean: dict = None):
+    def update_rows(self, data_json, edit_column_clean: dict = None, edit_column_messages: dict = None):
         logger.info("Попал в функцию обновления таблицы")
         data = self.sheet.get_all_records(expected_headers=[])
         df = pd.DataFrame(data)
@@ -444,17 +446,33 @@ class GoogleSheet:
             rule = clean_rules.get(column, False)
             return rule if isinstance(rule, bool) else str(article) in rule
 
-        try:
-            json_df = json_df.drop(["vendor_code", "account"], axis=1)
-        except KeyError as e:
-            logger.error(f"[func:update_rows] {e} 'vendor_code', 'account'")
+        def message_for(column, article, account=None):
+            messages = (edit_column_messages or {}).get(column, {})
+            if account:
+                compound_key = (str(account).capitalize(), str(article))
+                if compound_key in messages:
+                    return messages[compound_key]
+            return messages.get(str(article), messages.get(article))
+
+        def matching_rows_for(row):
+            matching = df[df["Артикул"] == row["Артикул"]]
+            account = row.get("account")
+            if account and "ЛК" in df.columns:
+                matching = matching[
+                    matching["ЛК"].astype(str).str.capitalize() == str(account).capitalize()
+                ]
+            return matching.index
+
+        json_df = json_df.drop(["vendor_code"], axis=1, errors="ignore")
         # Преобразуем все значения в json_df в типы данных, которые могут быть сериализованы в JSON
         json_df = json_df.astype(object).where(pd.notnull(json_df), None)
         # Обновите данные в основном DataFrame на основе "Артикул"
         for index, row in json_df.iterrows():
-            matching_rows = df[df["Артикул"] == row["Артикул"]].index
+            matching_rows = matching_rows_for(row)
             for idx in matching_rows:
                 for column in row.index:
+                    if column not in df.columns:
+                        continue
                     if pd.isna(df.at[idx, column]) or df.at[idx, column] == "":
                         df.at[idx, column] = row[column]
 
@@ -471,11 +489,20 @@ class GoogleSheet:
                     if should_clean("qty", row["Артикул"]):
                         df.at[idx, 'Новый остаток'] = ""
 
+                    for message_key, sheet_column in (
+                        ("price", "Установить новую цену"),
+                        ("discount", "Установить новую скидку %"),
+                        ("qty", "Новый остаток"),
+                    ):
+                        message = message_for(message_key, row["Артикул"], row.get("account"))
+                        if message is not None:
+                            df.at[idx, sheet_column] = message
+
         # Обновите Google Таблицу только для измененных строк
         updates = []
         headers = df.columns.tolist()
         for index, row in json_df.iterrows():
-            matching_rows = df[df["Артикул"] == row["Артикул"]].index
+            matching_rows = matching_rows_for(row)
             for idx in matching_rows:
                 # +2 потому что индексация в Google Таблицах начинается с 1, а первая строка - заголовки
                 row_number = idx + 2
@@ -499,6 +526,20 @@ class GoogleSheet:
                     if should_clean("qty", row["Артикул"]):
                         updates.append({'range': f'AF{row_number}', 'values': [['']]})
 
+                for message_key, sheet_column in (
+                    ("price", "Установить новую цену"),
+                    ("discount", "Установить новую скидку %"),
+                    ("qty", "Новый остаток"),
+                ):
+                    message = message_for(message_key, row["Артикул"], row.get("account"))
+                    if message is not None:
+                        column_index = headers.index(sheet_column) + 1
+                        column_letter = column_index_to_letter(column_index)
+                        updates.append({
+                            'range': f'{column_letter}{row_number}',
+                            'values': [[message]],
+                        })
+
         # pprint(updates)
         # self.sheet.batch_update(updates)
         safe_batch_update(
@@ -520,10 +561,6 @@ class GoogleSheet:
             article_dict["price_discount"] = \
                 {'Установить новую цену': row['Установить новую цену'].replace('\xa0', ''),
                  'Установить новую скидку %': row['Установить новую скидку %'].replace('\xa0', '')}
-        if service_google_sheet["Габариты"]:
-            article_dict["dimensions"] = {'Новая\nДлина (см)': row['Новая\nДлина (см)'].replace('\xa0', ''),
-                                          'Новая\nШирина (см)': row['Новая\nШирина (см)'].replace('\xa0', ''),
-                                          'Новая\nВысота (см)': row['Новая\nВысота (см)'].replace('\xa0', '')}
         return article_dict
 
     @staticmethod
@@ -564,6 +601,7 @@ class GoogleSheet:
         df = pd.DataFrame(data[1:], columns=data[0])
         result_nm_ids_data = {}
         result_qty_edit_data = {}
+        requested_edits = {}
         for index, row in df.iterrows():
             article = row['Артикул']
             account = str(row['ЛК']).capitalize()
@@ -573,12 +611,27 @@ class GoogleSheet:
             if not article.isdigit() or not account.strip() or article not in db_nm_ids_data or "vendor_code" not in db_nm_ids_data[article]:
                 continue
             article_dict = self.get_article_dict(service_google_sheet, row, db_nm_ids_data[article])
+            requested_fields = set()
+            if service_google_sheet["Цены/Скидки"]:
+                if str(row['Установить новую цену']).replace('\xa0', '').isdigit():
+                    requested_fields.add("price")
+                if str(row['Установить новую скидку %']).replace('\xa0', '').isdigit():
+                    requested_fields.add("discount")
+            if (service_google_sheet["Остаток"] and
+                    str(row["Новый остаток"]).replace('\xa0', '').isdigit()):
+                requested_fields.add("qty")
+            if requested_fields:
+                requested_edits.setdefault(account, {})[int(article)] = requested_fields
             self.update_result_qty_edit_data(service_google_sheet, result_qty_edit_data, account, row, chrt_ids_by_nm_id)
             if account not in result_nm_ids_data:
                 result_nm_ids_data[account] = {}
             result_nm_ids_data[account][article] = article_dict
 
-        return {"nm_ids_edit_data": result_nm_ids_data, "qty_edit_data": result_qty_edit_data}
+        return {
+            "nm_ids_edit_data": result_nm_ids_data,
+            "qty_edit_data": result_qty_edit_data,
+            "requested_edits": requested_edits,
+        }
 
     def create_lk_articles_list(self):
         """Создает словарь из ключей кабинета и его Артикулов"""

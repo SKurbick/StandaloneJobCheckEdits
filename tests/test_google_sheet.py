@@ -46,6 +46,28 @@ class GoogleSheetHelpersTest(unittest.TestCase):
             },
         )
 
+    def test_get_article_dict_ignores_dimension_edit_fields(self):
+        row = {
+            "Чистая прибыль 1ед.": "100",
+            "Установить новую цену": "500",
+            "Установить новую скидку %": "10",
+            "Новая\nДлина (см)": "20",
+            "Новая\nШирина (см)": "30",
+            "Новая\nВысота (см)": "40",
+        }
+
+        result = self.GoogleSheet.get_article_dict(
+            {"Цены/Скидки": 1, "Габариты": 1},
+            row,
+            {"vendor_code": "wild123"},
+        )
+
+        self.assertNotIn("dimensions", result)
+        self.assertEqual(
+            result["price_discount"],
+            {"Установить новую цену": "500", "Установить новую скидку %": "10"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

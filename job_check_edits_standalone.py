@@ -8,7 +8,6 @@ from collections import ChainMap
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import wraps
-from pprint import pprint
 from typing import Any, Dict, List, Set, Tuple
 
 import aiohttp
@@ -20,6 +19,11 @@ import requests
 from dotenv import load_dotenv
 from gspread import Client, service_account
 from loguru import logger as loguru_logger
+
+try:
+    from .article_state import ARTICLE_STATE_MESSAGES, ArticleState
+except ImportError:
+    from article_state import ARTICLE_STATE_MESSAGES, ArticleState
 
 
 load_dotenv()
@@ -448,9 +452,13 @@ class GoogleSheet:
         client = self.client_init_json()
         for _ in range(10):
             try:
-                print(sheet, "sheet")
                 spreadsheet = client.open(self.spreadsheet)
                 self.sheet = spreadsheet.worksheet(sheet)
+                logger.info(
+                    "Подключение к Google-таблице '{}' (лист '{}')",
+                    self.spreadsheet,
+                    sheet,
+                )
                 break
             except (gspread.exceptions.APIError, requests.exceptions.ConnectionError) as e:
                 logger.error(e)
@@ -653,7 +661,6 @@ class GoogleSheet:
             for idx, header in enumerate(headers):
                 if sheet_header in header.lower():
                     wild_col_idx = idx
-                    print(wild_col_idx)
 
             if wild_col_idx is None:
                 logger.error(f"Колонка {sheet_header} не найдена в таблице")
@@ -662,7 +669,6 @@ class GoogleSheet:
             # Находим индексы и диапазон наших целевых колонок
             # target_headers = list(next(iter(data_dict.values())).keys()) if data_dict else []
             target_headers = list(set().union(*(item.keys() for item in data_dict.values())))
-            print(f"Все целевые заголовки: {target_headers}")
 
             target_indices = []
 
@@ -802,10 +808,7 @@ class GoogleSheet:
             rule = clean_rules.get(column, False)
             return rule if isinstance(rule, bool) else str(article) in rule
 
-        try:
-            json_df = json_df.drop(["vendor_code", "account"], axis=1)
-        except KeyError as e:
-            logger.error(f"[func:update_rows] {e} 'vendor_code', 'account'")
+        json_df = json_df.drop(["vendor_code", "account"], axis=1, errors="ignore")
         # Преобразуем все значения в json_df в типы данных, которые могут быть сериализованы в JSON
         json_df = json_df.astype(object).where(pd.notnull(json_df), None)
         # Обновите данные в основном DataFrame на основе "Артикул"
@@ -1732,7 +1735,6 @@ class ServiceGoogleSheet:
                 logger.info(f"[INFO] {datetime.datetime.now()} обновляем данные в таблице ФОТО")
                 gs_connect_photo = GoogleSheet(creds_json=self.creds_json, spreadsheet=self.spreadsheet, sheet="ФОТО")
                 photos_str_keys = {str(k): v for k, v in photos.items()}
-                pprint(photos_str_keys)
                 gs_connect_photo.insert_wild_data_correct_preinsert(data_dict=photos_str_keys, sheet_header="артикул")
 
     async def add_new_data_from_table(self, lk_articles, edit_column_clean=None, only_edits_data=False,
@@ -1921,7 +1923,6 @@ class ServiceGoogleSheet:
         sheet_statuses = ServiceGoogleSheet.check_status()
         net_profit_status = sheet_statuses['Отрицательная \nЧП']
         price_discount_edit_status = sheet_statuses['Цены/Скидки']
-        dimensions_edit_status = sheet_statuses['Габариты']
         quantity_edit_status = sheet_statuses['Остаток']
         wb_api_factory = globals().get("WB_API_FACTORY")
         tokens = get_wb_tokens()
@@ -1931,7 +1932,7 @@ class ServiceGoogleSheet:
         async def process_account(account, nm_ids_data):
             account_updates = []
             account_clean = {"price_discount": set(), "dimensions": set(), "qty": set()}
-            valid_data_result = await validate_data(db_nm_ids_data, nm_ids_data)
+            account_messages = {"price": {}, "discount": {}, "qty": {}}
             token = tokens[account.capitalize()]
             if wb_api_factory is not None:
                 warehouses = wb_api_factory.WarehouseMarketplaceWB(token=token)
@@ -1939,6 +1940,40 @@ class ServiceGoogleSheet:
             else:
                 warehouses = WarehouseMarketplaceWB(token=token)
                 warehouses_qty_edit = LeftoversMarketplace(token=token)
+
+            requested_edits = edit_data_from_table.get("requested_edits", {}).get(account, {})
+            requested_nm_ids = set(requested_edits)
+            article_states = (
+                await (
+                    wb_api_factory.ListOfCardsContent(token=token)
+                    if wb_api_factory is not None
+                    else ListOfCardsContent(token=token)
+                ).get_article_states_async(requested_nm_ids, account=account)
+                if requested_nm_ids else {}
+            )
+            state_counts = {state.value: 0 for state in ArticleState}
+            for nm_id, state in article_states.items():
+                state_counts[state.value] += 1
+                message = ARTICLE_STATE_MESSAGES.get(state)
+                if message is not None:
+                    for field in requested_edits.get(nm_id, set()):
+                        account_messages[field][(account.capitalize(), str(nm_id))] = message
+            logger.info(
+                "Проверка состояний артикулов. account={} requested={} states={}",
+                account,
+                len(requested_nm_ids),
+                state_counts,
+            )
+
+            active_nm_ids = {
+                nm_id for nm_id, state in article_states.items()
+                if state == ArticleState.ACTIVE
+            }
+            active_nm_ids_data = {
+                str(nm_id): data for nm_id, data in nm_ids_data.items()
+                if int(nm_id) in active_nm_ids
+            }
+            valid_data_result = await validate_data(db_nm_ids_data, active_nm_ids_data)
 
             if len(valid_data_result) > 0:
                 logger.info("Данные валидны")
@@ -1949,15 +1984,11 @@ class ServiceGoogleSheet:
                     wb_api_price_and_discount = ListOfGoodsPricesAndDiscounts(token=token)
                     wb_api_content = ListOfCardsContent(token=token)
 
-                size_edit_data = []
                 price_discount_data = []
                 for nm_id, data in valid_data_result.items():
                     if ("price_discount" in data and price_discount_edit_status and
                             (data['net_profit'] >= 0 or net_profit_status)):
                         price_discount_data.append({"nmID": nm_id, **data["price_discount"]})
-                    if "dimensions" in data and dimensions_edit_status:
-                        size_edit_data.append({"nmID": nm_id, "vendorCode": data["vendorCode"],
-                                               "sizes": data["sizes"], "dimensions": data["dimensions"]})
 
                 if price_discount_data:
                     if wb_api_factory is not None:
@@ -1966,23 +1997,15 @@ class ServiceGoogleSheet:
                         wb_api_price_and_discount.add_new_price_and_discount(price_discount_data)
                     account_clean["price_discount"].update(item["nmID"] for item in price_discount_data)
 
-                if size_edit_data:
-                    if wb_api_factory is not None:
-                        await wb_api_content.size_edit_async(size_edit_data)
-                    else:
-                        wb_api_content.size_edit(size_edit_data)
-                    account_clean["dimensions"].update(item["nmID"] for item in size_edit_data)
-
                 account_updates.extend(int(nm_ids_str) for nm_ids_str in valid_data_result.keys())
 
             if (account in edit_data_from_table["qty_edit_data"] and
                     (len(edit_data_from_table["qty_edit_data"][account]["stocks"]) > 0 and quantity_edit_status)):
-                logger.info("изменение остатков на всех складах продавца")
                 qty_edit_data = edit_data_from_table["qty_edit_data"][account]
                 valid_qty_pairs = [
                     (stock, nm_id)
                     for stock, nm_id in zip(qty_edit_data["stocks"], qty_edit_data["nm_ids"])
-                    if stock.get("chrtId") is not None
+                    if stock.get("chrtId") is not None and nm_id in active_nm_ids
                 ]
                 skipped_qty_nm_ids = [
                     nm_id
@@ -1998,6 +2021,9 @@ class ServiceGoogleSheet:
 
                 qty_stocks = [stock for stock, _ in valid_qty_pairs]
                 qty_nm_ids = [nm_id for _, nm_id in valid_qty_pairs]
+                if not qty_stocks:
+                    return account, account_updates, account_clean, account_messages
+
                 requested_chrt_ids = {stock["chrtId"] for stock in qty_stocks}
                 successful_chrt_ids = requested_chrt_ids.copy()
                 if wb_api_factory is not None:
@@ -2034,7 +2060,7 @@ class ServiceGoogleSheet:
                 if qty_nm_ids:
                     account_updates.extend(qty_nm_ids)
 
-            return account, account_updates, account_clean
+            return account, account_updates, account_clean, account_messages
 
         async def run_account(account, nm_ids_data, semaphore=None):
             if semaphore is None:
@@ -2057,11 +2083,20 @@ class ServiceGoogleSheet:
 
         updates_nm_ids_data = {}
         edit_column_clean = {"price_discount": set(), "dimensions": set(), "qty": set()}
-        for account, account_updates, account_clean in account_results:
+        edit_column_messages = {"price": {}, "discount": {}, "qty": {}}
+        message_rows = {}
+        for account, account_updates, account_clean, account_messages in account_results:
             if account_updates:
                 updates_nm_ids_data[account] = account_updates
             for clean_key, clean_values in account_clean.items():
                 edit_column_clean[clean_key].update(clean_values)
+            for message_key, messages in account_messages.items():
+                edit_column_messages[message_key].update(messages)
+                for message_account, nm_id in messages:
+                    message_rows[f"{message_account}:{nm_id}"] = {
+                        "Артикул": int(nm_id),
+                        "account": message_account,
+                    }
 
         if updates_nm_ids_data:
             await asyncio.sleep(5)
@@ -2072,9 +2107,10 @@ class ServiceGoogleSheet:
                 check_nm_ids_in_db=False,
                 db=db,
             )
-            return updated_data, edit_column_clean
+            updated_data.update(message_rows)
+            return updated_data, edit_column_clean, edit_column_messages
 
-        return updates_nm_ids_data, edit_column_clean
+        return message_rows, edit_column_clean, edit_column_messages
 
 
 def gs_connection():
@@ -2122,7 +2158,6 @@ async def check_edits_columns(db: Database1):
                 logger.info("СЕРВИС РЕДАКТИРОВАНИЯ АКТИВЕН. Оцениваем ячейки по изменениям товара")
                 db_nm_ids_data = await ArticleTable(db).get_all_nm_ids()
                 chrt_ids_by_nm_id = {}
-                print("получаем из бд артикулы и chrt_id")
                 chrt_ids = await CardData(db=db).get_chrt_ids()
                 for cd in chrt_ids:
                     # print(cd)
@@ -2132,7 +2167,7 @@ async def check_edits_columns(db: Database1):
                     service_gs_table = ServiceGoogleSheet(
                         token=None, sheet=sheet, spreadsheet=spreadsheet, creds_json=creds_json)
 
-                    (edit_nm_ids_data, successful_edits) = await (
+                    (edit_nm_ids_data, successful_edits, edit_messages) = await (
                         service_gs_table.change_cards_and_tables_data(
                             db_nm_ids_data=db_nm_ids_data,
                             edit_data_from_table=edit_data_from_table,
@@ -2143,6 +2178,7 @@ async def check_edits_columns(db: Database1):
                         gs_connect.update_rows(
                             data_json=edit_nm_ids_data,
                             edit_column_clean=successful_edits,
+                            edit_column_messages=edit_messages,
                         )
                         return create_lk_articles(edit_nm_ids_data)
                     return None
@@ -2282,7 +2318,6 @@ async def job_check_edits_columns_and_add_actually_data_to_table():
                     "Актуализация информации по ценам, скидкам, габаритам, комиссии, логистики от склада WB до ПВЗ")
         logger.info("Запуск : Смотрит в таблицу, оценивает изменения")
         result = await check_edits_columns(db=db)
-        pprint(result)
         if result:
             logger.info("Завершение : Внесение изменений в таблицу")
             await service.actualize_card_data_in_db(result)

@@ -6,6 +6,11 @@ from collections import defaultdict
 from contextlib import asynccontextmanager
 
 try:
+    from .article_state import ArticleState
+except ImportError:
+    from article_state import ArticleState
+
+try:
     from .domain import process_local_vendor_code, process_string
 except ImportError:
     from domain import process_local_vendor_code, process_string
@@ -113,6 +118,103 @@ class ListOfCardsContent(_WBClient):
         super().__init__(token=token, session=session, logger=logger, limiter=limiter)
         self.url = "https://content-api.wildberries.ru/content/v2/get/cards/{}"
         self.update_url = "https://content-api.wildberries.ru/content/v2/cards/{}"
+
+    async def _find_requested_nm_ids(self, endpoint, requested_nm_ids, limit=100):
+        """Return matching ids and whether the paginated scan completed."""
+        aiohttp = _require_aiohttp()
+        requested = {int(nm_id) for nm_id in requested_nm_ids}
+        found = set()
+        url = self.url.format(endpoint)
+        payload = {
+            "settings": {
+                "sort": {"ascending": True},
+                "cursor": {"limit": limit},
+                "filter": {"withPhoto": -1},
+            }
+        }
+
+        while requested - found:
+            response_result = None
+            page_loaded = False
+            for attempt in range(1, 4):
+                try:
+                    async with self._limited("content_read"):
+                        async with self._session_scope() as session:
+                            async with session.post(url, headers=self.headers, json=payload) as response:
+                                status = response.status
+                                try:
+                                    response_result = await response.json()
+                                except Exception:
+                                    response_result = None
+                    if status == 200 and isinstance(response_result, dict):
+                        page_loaded = True
+                        break
+                    self._warning(
+                        f"Не удалось проверить карточки WB. endpoint={endpoint} "
+                        f"status={status} attempt={attempt}/3 response={response_result}"
+                    )
+                except _aiohttp_transient_errors(aiohttp) as exc:
+                    self._warning(
+                        f"Ошибка соединения при проверке карточек WB. endpoint={endpoint} "
+                        f"attempt={attempt}/3 error={exc}"
+                    )
+                if attempt < 3:
+                    await asyncio.sleep(20)
+
+            if not page_loaded:
+                return found, False
+
+            cursor = response_result.get("cursor")
+            cards = response_result.get("cards")
+            if not isinstance(cursor, dict) or not isinstance(cards, list):
+                self._warning(
+                    f"Некорректный ответ проверки карточек WB. endpoint={endpoint} "
+                    f"response={response_result}"
+                )
+                return found, False
+
+            for card in cards:
+                if isinstance(card, dict) and card.get("nmID") in requested:
+                    found.add(card["nmID"])
+
+            total = cursor.get("total")
+            if not isinstance(total, int):
+                return found, False
+            if total < limit or not cards:
+                return found, True
+
+            updated_at = cursor.get("updatedAt")
+            cursor_nm_id = cursor.get("nmID")
+            if updated_at is None or cursor_nm_id is None:
+                return found, False
+            payload["settings"]["cursor"].update(
+                {"updatedAt": updated_at, "nmID": cursor_nm_id}
+            )
+
+        return found, True
+
+    async def get_article_states_async(self, nm_ids, account=None):
+        """Classify articles without treating an API failure as absence."""
+        requested = {int(nm_id) for nm_id in nm_ids}
+        states = {}
+        active_ids, active_complete = await self._find_requested_nm_ids("list", requested)
+        states.update({nm_id: ArticleState.ACTIVE for nm_id in active_ids})
+
+        unresolved = requested - active_ids
+        if not active_complete:
+            states.update({nm_id: ArticleState.CHECK_FAILED for nm_id in unresolved})
+            self._warning(
+                f"Проверка активных карточек завершилась ошибкой. "
+                f"account={account} unresolved_nm_ids={sorted(unresolved)}"
+            )
+            return states
+
+        trash_ids, trash_complete = await self._find_requested_nm_ids("trash", unresolved.copy())
+        states.update({nm_id: ArticleState.IN_TRASH for nm_id in trash_ids})
+        unresolved = unresolved - trash_ids
+        final_state = ArticleState.NOT_FOUND if trash_complete else ArticleState.CHECK_FAILED
+        states.update({nm_id: final_state for nm_id in unresolved})
+        return states
 
     async def get_list_of_cards_async(self, nm_ids_list: list, limit: int = 100, account=None) -> dict:
         """Получение всех карточек по совпадению с nm_ids_list."""
