@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import patch
 
@@ -38,11 +39,14 @@ class FakeDB:
 
 
 class FakeTokenProvider:
-    def get(self, account):
+    def get_optional(self, account):
         return f"token-{account}"
 
 
 class FakeLogger:
+    def warning(self, *args, **kwargs):
+        pass
+
     def info(self, *args, **kwargs):
         pass
 
@@ -144,6 +148,82 @@ class CardActualizationServiceTest(unittest.IsolatedAsyncioTestCase):
             30,
         ))
         self.assertEqual(FakeUnitEconomicsTable.updated[0][:7], (123, 12, 5, 33, 100, 42, 8))
+
+
+    async def test_missing_token_and_failed_account_do_not_stop_batch(self):
+        class SelectiveTokenProvider:
+            def get_optional(self, account):
+                return {
+                    " СТАРТ0854 ": "token-start",
+                    "Broken": "token-broken",
+                }.get(account)
+
+        class RecordingLogger(FakeLogger):
+            def __init__(self):
+                self.warnings = []
+                self.errors = []
+
+            def warning(self, message, *args, **kwargs):
+                self.warnings.append(message)
+
+            def error(self, message, *args, **kwargs):
+                self.errors.append(message)
+
+        logger = RecordingLogger()
+        service = CardActualizationService(
+            token_provider=SelectiveTokenProvider(),
+            wb_api=object(),
+            logger=logger,
+        )
+        called_accounts = []
+
+        async def fake_get_actually_data_by_account(account, token, articles):
+            called_accounts.append(account)
+            if account == "Broken":
+                raise RuntimeError("account failure")
+            return {
+                123: {
+                    "account": account,
+                    "local_vendor_code": "wild1",
+                    "vendor_code": "vendor1",
+                    "barcode": "barcode1",
+                    "commission_wb": 12,
+                    "discount": 5,
+                    "height": 10,
+                    "length": 20,
+                    "logistic_from_wb_wh_to_opp": 33,
+                    "photo_link": "photo",
+                    "price": 100,
+                    "subject_name": "subject",
+                    "width": 30,
+                }
+            }
+
+        service.get_actually_data_by_account = fake_get_actually_data_by_account
+        fake_db = FakeDB()
+
+        with (
+            patch("services.card_actualization.CostPriceTable", FakeCostPriceTable),
+            patch("services.card_actualization.ArticleTable", FakeArticleTable),
+            patch("services.card_actualization.CardData", FakeCardData),
+            patch("services.card_actualization.UnitEconomicsTable", FakeUnitEconomicsTable),
+        ):
+            await service.actualize_card_data_in_db(
+                {" СТАРТ0854 ": {123}, "Missing": {456}, "Broken": {789}},
+                db=fake_db,
+            )
+
+        self.assertCountEqual(called_accounts, [" СТАРТ0854 ", "Broken"])
+        self.assertNotIn("Missing", called_accounts)
+        self.assertEqual(FakeArticleTable.updated[0][0], 123)
+        self.assertEqual(len(logger.warnings), 1)
+        self.assertEqual(len(logger.errors), 1)
+        current_task = asyncio.current_task()
+        pending_tasks = [
+            task for task in asyncio.all_tasks()
+            if task is not current_task and not task.done()
+        ]
+        self.assertEqual(pending_tasks, [])
 
 
 if __name__ == "__main__":

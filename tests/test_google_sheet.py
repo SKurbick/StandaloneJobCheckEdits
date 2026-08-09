@@ -10,7 +10,7 @@ class FakeSheet:
         return self._values
 
 
-class GoogleSheetHelpersTest(unittest.TestCase):
+class GoogleSheetHelpersTest(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         if importlib.util.find_spec("gspread") is None or importlib.util.find_spec("pandas") is None:
@@ -66,6 +66,42 @@ class GoogleSheetHelpersTest(unittest.TestCase):
         self.assertEqual(
             result["price_discount"],
             {"Установить новую цену": "500", "Установить новую скидку %": "10"},
+        )
+
+
+    async def test_sheet_account_matches_differently_formatted_db_account(self):
+        google_sheet = object.__new__(self.GoogleSheet)
+        headers = [
+            "Артикул",
+            "ЛК",
+            "Чистая прибыль 1ед.",
+            "Установить новую цену",
+            "Установить новую скидку %",
+            "Новый остаток",
+        ]
+        google_sheet.sheet = FakeSheet(
+            [headers, ["767130070", "\u00a0СТАРТ0854\u00a0", "100", "", "", "0"]]
+        )
+
+        result = await google_sheet.get_edit_data(
+            {
+                "767130070": {
+                    "account": " старт0854 ",
+                    "vendor_code": "wild802",
+                }
+            },
+            {"Цены/Скидки": 0, "Остаток": 1},
+            {767130070: 1120421845},
+        )
+
+        self.assertIn("Старт0854", result["nm_ids_edit_data"])
+        self.assertEqual(
+            result["qty_edit_data"]["Старт0854"]["stocks"],
+            [{"chrtId": 1120421845, "amount": 0}],
+        )
+        self.assertEqual(
+            result["requested_edits"]["Старт0854"][767130070],
+            {"qty"},
         )
 
 

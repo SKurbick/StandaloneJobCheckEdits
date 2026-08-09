@@ -21,8 +21,10 @@ from gspread import Client, service_account
 from loguru import logger as loguru_logger
 
 try:
+    from .account_names import normalize_account_mapping, normalize_account_name
     from .article_state import ARTICLE_STATE_MESSAGES, ArticleState
 except ImportError:
+    from account_names import normalize_account_mapping, normalize_account_name
     from article_state import ARTICLE_STATE_MESSAGES, ArticleState
 
 
@@ -116,7 +118,10 @@ logger.info("time to start:", datetime.datetime.now().time().strftime("%H:%M:%S"
 
 def get_wb_tokens() -> dict:
     with open(settings.TOKENS_FILE_NAME, "r", encoding="utf-8") as file:
-        return json.load(file)
+        raw_tokens = json.load(file)
+    return normalize_account_mapping(
+        raw_tokens, logger=logger, source=settings.TOKENS_FILE_NAME
+    )
 
 
 
@@ -927,7 +932,7 @@ class GoogleSheet:
         result_qty_edit_data = {}
         for index, row in df.iterrows():
             article = row['Артикул']
-            account = str(row['ЛК']).capitalize()
+            account = normalize_account_name(row['ЛК'])
             # if any([not article.isdigit(), not account.strip(), article not in db_nm_ids_data.keys(),
             #         "vendor_code" not in db_nm_ids_data[article]]):
             #     continue
@@ -949,7 +954,7 @@ class GoogleSheet:
         for index, row in df.iterrows():
 
             article = row['Артикул']
-            lk = row['ЛК'].upper()
+            lk = normalize_account_name(row['ЛК'])
             # Пропускаем строки с пустыми значениями в столбце "ЛК" "Артикул"
             if pd.isna(lk) or lk == "":
                 continue
@@ -965,9 +970,9 @@ class GoogleSheet:
             #         str(row['Установить новую скидку %']).replace('\xa0', '').isdigit(),
             #         str(row["Новый остаток"]).replace('\xa0', '').isdigit()):
             #     continue
-            if lk.upper() not in lk_articles_dict:
-                lk_articles_dict[lk.upper()] = []
-            lk_articles_dict[lk.upper()].append(article)
+            if lk not in lk_articles_dict:
+                lk_articles_dict[lk] = []
+            lk_articles_dict[lk].append(article)
         return lk_articles_dict
 
     def check_status_service_sheet(self):
@@ -1074,9 +1079,10 @@ class ListOfCardsContent:
                         }
 
                         # добавляем данные по skus с ключом кабинета и артикула
-                        if account not in data_for_warehouse.keys():
-                            data_for_warehouse[account] = {}
-                        data_for_warehouse[account].update({str(card["nmID"]): {"skus": card["sizes"][0]["skus"]}})
+                        account_key = normalize_account_name(account)
+                        if account_key not in data_for_warehouse:
+                            data_for_warehouse[account_key] = {}
+                        data_for_warehouse[account_key].update({str(card["nmID"]): {"skus": card["sizes"][0]["skus"]}})
 
                         nm_ids_list_for_edit.remove(card["nmID"])
 
@@ -1688,11 +1694,24 @@ class ServiceGoogleSheet:
         logger.info("Получение артикулов из гугл-таблицы")
         lk_articles = self.gs_connect.create_lk_articles_list()
         tasks = []
+        task_accounts = []
         logger.info("Получение актуальных данных из базы данных")
         for account, articles in lk_articles.items():
             task = self.get_actually_data_from_db(db, set(articles))
             tasks.append(task)
-        return await asyncio.gather(*tasks)
+            task_accounts.append(account)
+        gathered_results = await asyncio.gather(*tasks, return_exceptions=True)
+        successful_results = []
+        for account, result in zip(task_accounts, gathered_results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "Не удалось получить данные БД для кабинета {!r}: {}",
+                    account,
+                    result,
+                )
+                continue
+            successful_results.append(result)
+        return successful_results
 
     @staticmethod
     def _get_photos_and_filter_empty_value(article_id_to_update: List[Dict[str, Any]]) -> Tuple[
@@ -1743,12 +1762,11 @@ class ServiceGoogleSheet:
         wb_api_factory = globals().get("WB_API_FACTORY")
         tokens = get_wb_tokens()
 
-        async def process_account(account, nm_ids):
+        async def process_account(account, nm_ids, token):
             account_photos = {}
             account_result = {}
             account_filter_nm_ids = []
             nm_ids_for_add = []
-            token = tokens[account.capitalize()]
             nm_ids_result = nm_ids
 
             if check_nm_ids_in_db:
@@ -1871,28 +1889,55 @@ class ServiceGoogleSheet:
                 nm_ids_for_add = list(nm_ids_result)
             return account_photos, account_result, account_filter_nm_ids, nm_ids_for_add
 
-        async def run_account(account, nm_ids, semaphore=None):
+        async def run_account(account, nm_ids, token, semaphore=None):
             if semaphore is None:
-                return await process_account(account, nm_ids)
+                return await process_account(account, nm_ids, token)
             async with semaphore:
-                return await process_account(account, nm_ids)
+                return await process_account(account, nm_ids, token)
+
+        validated_accounts_data = []
+        for account, nm_ids in lk_articles.items():
+            normalized_account = normalize_account_name(account)
+            token = tokens.get(normalized_account)
+            if not token:
+                logger.warning(
+                    f"Кабинет {account!r} пропущен: для ключа "
+                    f"{normalized_account!r} отсутствует токен WB"
+                )
+                continue
+            validated_accounts_data.append((account, nm_ids, token))
 
         if wb_api_factory is not None:
             account_limit = getattr(wb_api_factory, "account_concurrency", None)
             account_semaphore = asyncio.Semaphore(account_limit) if account_limit else None
-            account_results = await asyncio.gather(*[
-                run_account(account, nm_ids, account_semaphore)
-                for account, nm_ids in lk_articles.items()
-            ])
+            gathered_results = await asyncio.gather(*[
+                run_account(account, nm_ids, token, account_semaphore)
+                for account, nm_ids, token in validated_accounts_data
+            ], return_exceptions=True)
+            account_results = list(zip(
+                [account for account, _, _ in validated_accounts_data],
+                gathered_results,
+            ))
         else:
             account_results = []
-            for account, nm_ids in lk_articles.items():
-                account_results.append(await run_account(account, nm_ids))
+            for account, nm_ids, token in validated_accounts_data:
+                try:
+                    result = await run_account(account, nm_ids, token)
+                except Exception as error:
+                    result = error
+                account_results.append((account, result))
 
         nm_ids_photo = {}
         result_nm_ids_data = {}
         filter_nm_ids_data = []
-        for account, account_result in zip(lk_articles.keys(), account_results):
+        for account, account_result in account_results:
+            if isinstance(account_result, BaseException):
+                logger.error(
+                    "Кабинет {!r} завершился с ошибкой при загрузке данных: {}",
+                    account,
+                    account_result,
+                )
+                continue
             account_photos, account_data, account_filter_nm_ids, nm_ids_for_add = account_result
             nm_ids_photo.update(account_photos)
             result_nm_ids_data.update(account_data)
@@ -1929,11 +1974,11 @@ class ServiceGoogleSheet:
 
         logger.info("Получил данные по ячейкам на изменение товара")
 
-        async def process_account(account, nm_ids_data):
+        async def process_account(account, nm_ids_data, token):
+            account_key = normalize_account_name(account)
             account_updates = []
             account_clean = {"price_discount": set(), "dimensions": set(), "qty": set()}
             account_messages = {"price": {}, "discount": {}, "qty": {}}
-            token = tokens[account.capitalize()]
             if wb_api_factory is not None:
                 warehouses = wb_api_factory.WarehouseMarketplaceWB(token=token)
                 warehouses_qty_edit = wb_api_factory.LeftoversMarketplace(token=token)
@@ -1941,7 +1986,7 @@ class ServiceGoogleSheet:
                 warehouses = WarehouseMarketplaceWB(token=token)
                 warehouses_qty_edit = LeftoversMarketplace(token=token)
 
-            requested_edits = edit_data_from_table.get("requested_edits", {}).get(account, {})
+            requested_edits = edit_data_from_table.get("requested_edits", {}).get(account_key, {})
             requested_nm_ids = set(requested_edits)
             article_states = (
                 await (
@@ -1957,7 +2002,7 @@ class ServiceGoogleSheet:
                 message = ARTICLE_STATE_MESSAGES.get(state)
                 if message is not None:
                     for field in requested_edits.get(nm_id, set()):
-                        account_messages[field][(account.capitalize(), str(nm_id))] = message
+                        account_messages[field][(normalize_account_name(account), str(nm_id))] = message
             logger.info(
                 "Проверка состояний артикулов. account={} requested={} states={}",
                 account,
@@ -1999,9 +2044,9 @@ class ServiceGoogleSheet:
 
                 account_updates.extend(int(nm_ids_str) for nm_ids_str in valid_data_result.keys())
 
-            if (account in edit_data_from_table["qty_edit_data"] and
-                    (len(edit_data_from_table["qty_edit_data"][account]["stocks"]) > 0 and quantity_edit_status)):
-                qty_edit_data = edit_data_from_table["qty_edit_data"][account]
+            if (account_key in edit_data_from_table["qty_edit_data"] and
+                    (len(edit_data_from_table["qty_edit_data"][account_key]["stocks"]) > 0 and quantity_edit_status)):
+                qty_edit_data = edit_data_from_table["qty_edit_data"][account_key]
                 valid_qty_pairs = [
                     (stock, nm_id)
                     for stock, nm_id in zip(qty_edit_data["stocks"], qty_edit_data["nm_ids"])
@@ -2057,35 +2102,70 @@ class ServiceGoogleSheet:
                     for stock, nm_id in zip(qty_stocks, qty_nm_ids)
                     if stock["chrtId"] in successful_chrt_ids
                 )
+                successful_qty_updates = [
+                    (nm_id, stock["amount"])
+                    for stock, nm_id in zip(qty_stocks, qty_nm_ids)
+                    if stock["chrtId"] in successful_chrt_ids
+                ]
+                if successful_qty_updates:
+                    if db is None:
+                        logger.warning(
+                            "Успешные изменения остатков не записаны в БД: db context не передан. "
+                            "account: {} nm_ids: {}",
+                            account,
+                            [nm_id for nm_id, _ in successful_qty_updates],
+                        )
+                    else:
+                        await CurrentStocksQuantityTable(db=db).upsert_fbs_quantity(
+                            successful_qty_updates
+                        )
                 if qty_nm_ids:
                     account_updates.extend(qty_nm_ids)
 
             return account, account_updates, account_clean, account_messages
 
-        async def run_account(account, nm_ids_data, semaphore=None):
+        async def run_account(account, nm_ids_data, token, semaphore=None):
             if semaphore is None:
-                return await process_account(account, nm_ids_data)
+                return await process_account(account, nm_ids_data, token)
             async with semaphore:
-                return await process_account(account, nm_ids_data)
+                return await process_account(account, nm_ids_data, token)
 
-        accounts_data = list(edit_data_from_table["nm_ids_edit_data"].items())
+        accounts_data = []
+        for account, nm_ids_data in edit_data_from_table["nm_ids_edit_data"].items():
+            normalized_account = normalize_account_name(account)
+            token = tokens.get(normalized_account)
+            if not token:
+                logger.warning(
+                    f"Кабинет {account!r} пропущен: для ключа "
+                    f"{normalized_account!r} отсутствует токен WB"
+                )
+                continue
+            accounts_data.append((account, nm_ids_data, token))
         if wb_api_factory is not None:
             account_limit = getattr(wb_api_factory, "account_concurrency", None)
             account_semaphore = asyncio.Semaphore(account_limit) if account_limit else None
             account_results = await asyncio.gather(*[
-                run_account(account, nm_ids_data, account_semaphore)
-                for account, nm_ids_data in accounts_data
-            ])
+                run_account(account, nm_ids_data, token, account_semaphore)
+                for account, nm_ids_data, token in accounts_data
+            ], return_exceptions=True)
         else:
             account_results = []
-            for account, nm_ids_data in accounts_data:
-                account_results.append(await run_account(account, nm_ids_data))
+            for account, nm_ids_data, token in accounts_data:
+                try:
+                    result = await run_account(account, nm_ids_data, token)
+                except Exception as error:
+                    result = error
+                account_results.append(result)
 
         updates_nm_ids_data = {}
         edit_column_clean = {"price_discount": set(), "dimensions": set(), "qty": set()}
         edit_column_messages = {"price": {}, "discount": {}, "qty": {}}
         message_rows = {}
-        for account, account_updates, account_clean, account_messages in account_results:
+        for account_result in account_results:
+            if isinstance(account_result, BaseException):
+                logger.error("Ошибка обработки отдельного WB-кабинета: {}", account_result)
+                continue
+            account, account_updates, account_clean, account_messages = account_result
             if account_updates:
                 updates_nm_ids_data[account] = account_updates
             for clean_key, clean_values in account_clean.items():
@@ -2141,6 +2221,7 @@ def create_lk_articles(edit_nm_ids_data: Dict[str, Any]) -> dict[Any, set[str]]:
                 v,
             )
             continue
+        account = normalize_account_name(account)
         if account not in result:
             result[account] = {k}
         else:
@@ -2199,17 +2280,36 @@ class Service:
         logger.info("Обновление состояния данных карточек по всем кабинетам в бд")
         time_start = datetime.datetime.now()
         tasks = []
+        task_accounts = []
+        tokens = get_wb_tokens()
         for account, nm_ids in account_articles.items():
-            tokens = get_wb_tokens()
-            token = tokens[account.capitalize()]
+            normalized_account = normalize_account_name(account)
+            token = tokens.get(normalized_account)
+            if not token:
+                logger.warning(
+                    f"Кабинет {account!r} пропущен: для ключа "
+                    f"{normalized_account!r} отсутствует токен WB"
+                )
+                continue
             task = asyncio.create_task(self.get_actually_data_by_account(
                 token=token,
                 account=account,
                 articles=nm_ids
             ))
             tasks.append(task)
+            task_accounts.append(account)
 
-        together_results = await asyncio.gather(*tasks)
+        gathered_results = await asyncio.gather(*tasks, return_exceptions=True)
+        together_results = []
+        for account, result in zip(task_accounts, gathered_results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "Кабинет {!r} завершился с ошибкой при актуализации карточек: {}",
+                    account,
+                    result,
+                )
+                continue
+            together_results.append(result)
 
         to_update_card_data = []
         to_update_article = []

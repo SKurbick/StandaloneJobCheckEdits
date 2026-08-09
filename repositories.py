@@ -89,6 +89,30 @@ class CardData:
         await self.db.executemany(query, data)
 
 
+class CurrentStocksQuantityTable:
+    def __init__(self, db):
+        self.db = db
+
+    async def upsert_fbs_quantity(self, data):
+        """Persist successfully accepted FBS stock edits by article and type."""
+        query = """
+        WITH updated AS (
+            UPDATE current_stocks_quantity
+            SET quantity = $2::int4,
+                updated_data_time = CURRENT_TIMESTAMP
+            WHERE article_id = $1::int4
+              AND quantity_type = 'ФБС'
+            RETURNING id
+        )
+        INSERT INTO current_stocks_quantity (
+            article_id, quantity_type, quantity, updated_data_time
+        )
+        SELECT $1::int4, 'ФБС', $2::int4, CURRENT_TIMESTAMP
+        WHERE NOT EXISTS (SELECT 1 FROM updated);
+        """
+        await self.db.executemany(query, data)
+
+
 class CostPriceTable:
     def __init__(self, db):
         self.db = db

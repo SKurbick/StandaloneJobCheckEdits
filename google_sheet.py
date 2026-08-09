@@ -10,8 +10,10 @@ from gspread import Client, service_account
 from loguru import logger
 
 try:
+    from .account_names import normalize_account_name
     from .domain import column_index_to_letter
 except ImportError:
+    from account_names import normalize_account_name
     from domain import column_index_to_letter
 
 
@@ -449,7 +451,7 @@ class GoogleSheet:
         def message_for(column, article, account=None):
             messages = (edit_column_messages or {}).get(column, {})
             if account:
-                compound_key = (str(account).capitalize(), str(article))
+                compound_key = (normalize_account_name(account), str(article))
                 if compound_key in messages:
                     return messages[compound_key]
             return messages.get(str(article), messages.get(article))
@@ -459,7 +461,7 @@ class GoogleSheet:
             account = row.get("account")
             if account and "ЛК" in df.columns:
                 matching = matching[
-                    matching["ЛК"].astype(str).str.capitalize() == str(account).capitalize()
+                    matching["ЛК"].map(normalize_account_name) == normalize_account_name(account)
                 ]
             return matching.index
 
@@ -604,7 +606,7 @@ class GoogleSheet:
         requested_edits = {}
         for index, row in df.iterrows():
             article = row['Артикул']
-            account = str(row['ЛК']).capitalize()
+            account = normalize_account_name(row['ЛК'])
             # if any([not article.isdigit(), not account.strip(), article not in db_nm_ids_data.keys(),
             #         "vendor_code" not in db_nm_ids_data[article]]):
             #     continue
@@ -641,7 +643,7 @@ class GoogleSheet:
         for index, row in df.iterrows():
 
             article = row['Артикул']
-            lk = row['ЛК'].upper()
+            lk = normalize_account_name(row['ЛК'])
             # Пропускаем строки с пустыми значениями в столбце "ЛК" "Артикул"
             if pd.isna(lk) or lk == "":
                 continue
@@ -657,9 +659,9 @@ class GoogleSheet:
             #         str(row['Установить новую скидку %']).replace('\xa0', '').isdigit(),
             #         str(row["Новый остаток"]).replace('\xa0', '').isdigit()):
             #     continue
-            if lk.upper() not in lk_articles_dict:
-                lk_articles_dict[lk.upper()] = []
-            lk_articles_dict[lk.upper()].append(article)
+            if lk not in lk_articles_dict:
+                lk_articles_dict[lk] = []
+            lk_articles_dict[lk].append(article)
         return lk_articles_dict
 
     def check_status_service_sheet(self):

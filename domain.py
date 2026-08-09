@@ -5,6 +5,11 @@ from collections import ChainMap
 from typing import Any
 
 try:
+    from .account_names import normalize_account_name
+except ImportError:
+    from account_names import normalize_account_name
+
+try:
     from . import constants as columns
 except ImportError:
     import constants as columns
@@ -92,6 +97,7 @@ def create_lk_articles(edit_nm_ids_data: dict[str, Any], logger=None) -> dict[An
                     v,
                 )
             continue
+        account = normalize_account_name(account)
         if account not in result:
             result[account] = {k}
         else:

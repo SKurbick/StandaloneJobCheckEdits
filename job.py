@@ -31,7 +31,7 @@ def _legacy():
 
 async def _job_impl():
     legacy = _legacy()
-    token_provider = TokenProvider(settings.TOKENS_FILE_NAME)
+    token_provider = TokenProvider(settings.TOKENS_FILE_NAME, logger=legacy.logger)
     legacy.configure_token_provider(token_provider)
     legacy.configure_domain_helpers()
     legacy.configure_infrastructure()

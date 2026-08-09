@@ -9,6 +9,7 @@ if __package__:
     from .repositories import (
         ArticleTable as RefactoredArticleTable,
         CardData as RefactoredCardData,
+        CurrentStocksQuantityTable as RefactoredCurrentStocksQuantityTable,
         CostPriceDBContainer as RefactoredCostPriceDBContainer,
         CostPriceTable as RefactoredCostPriceTable,
         UnitEconomicsTable as RefactoredUnitEconomicsTable,
@@ -22,6 +23,7 @@ else:
     from repositories import (
         ArticleTable as RefactoredArticleTable,
         CardData as RefactoredCardData,
+        CurrentStocksQuantityTable as RefactoredCurrentStocksQuantityTable,
         CostPriceDBContainer as RefactoredCostPriceDBContainer,
         CostPriceTable as RefactoredCostPriceTable,
         UnitEconomicsTable as RefactoredUnitEconomicsTable,
@@ -62,6 +64,7 @@ def configure_infrastructure():
     _impl.Database1 = RefactoredDatabase1
     _impl.ArticleTable = RefactoredArticleTable
     _impl.CardData = RefactoredCardData
+    _impl.CurrentStocksQuantityTable = RefactoredCurrentStocksQuantityTable
     _impl.CostPriceTable = RefactoredCostPriceTable
     _impl.CostPriceDBContainer = RefactoredCostPriceDBContainer
     _impl.UnitEconomicsTable = RefactoredUnitEconomicsTable

@@ -5,9 +5,11 @@ import datetime
 from typing import Dict
 
 try:
+    from ..account_names import normalize_account_name
     from ..domain import calculate_sum_for_logistic, merge_dicts
     from ..repositories import ArticleTable, CardData, CostPriceDBContainer, CostPriceTable, UnitEconomicsTable
 except ImportError:
+    from account_names import normalize_account_name
     from domain import calculate_sum_for_logistic, merge_dicts
     from repositories import ArticleTable, CardData, CostPriceDBContainer, CostPriceTable, UnitEconomicsTable
 
@@ -23,16 +25,33 @@ class CardActualizationService:
         self.logger.info("Обновление состояния данных карточек по всем кабинетам в бд")
         time_start = datetime.datetime.now()
         tasks = []
+        task_accounts = []
         for account, nm_ids in account_articles.items():
-            token = self.token_provider.get(account)
+            normalized_account = normalize_account_name(account)
+            token = self.token_provider.get_optional(account)
+            if not token:
+                self.logger.warning(
+                    f"Кабинет {account!r} пропущен: для ключа "
+                    f"{normalized_account!r} отсутствует токен WB"
+                )
+                continue
             task = asyncio.create_task(self.get_actually_data_by_account(
                 token=token,
                 account=account,
                 articles=nm_ids
             ))
             tasks.append(task)
+            task_accounts.append(account)
 
-        together_results = await asyncio.gather(*tasks)
+        gathered_results = await asyncio.gather(*tasks, return_exceptions=True)
+        together_results = []
+        for account, result in zip(task_accounts, gathered_results):
+            if isinstance(result, BaseException):
+                self.logger.error(
+                    f"Кабинет {account!r} завершился с ошибкой при актуализации карточек: {result}"
+                )
+                continue
+            together_results.append(result)
 
         to_update_card_data = []
         to_update_article = []
