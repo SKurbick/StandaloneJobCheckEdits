@@ -24,6 +24,7 @@ class Settings:
     TOKENS_FILE_NAME: str = os.getenv("TOKENS_FILE_NAME", "tokens.json")
     PC_SHEET: str | None = os.getenv("PC_SHEET")
     PC_SPREADSHEET: str | None = os.getenv("PC_SPREADSHEET")
+    FBS_STOCKS_DISABLED_ACCOUNTS: str = os.getenv("FBS_STOCKS_DISABLED_ACCOUNTS", "")
 
 
 @dataclass(frozen=True)

@@ -21,10 +21,10 @@ from gspread import Client, service_account
 from loguru import logger as loguru_logger
 
 try:
-    from .account_names import normalize_account_mapping, normalize_account_name
+    from .account_names import is_fbs_stocks_disabled, normalize_account_mapping, normalize_account_name
     from .article_state import ARTICLE_STATE_MESSAGES, ArticleState
 except ImportError:
-    from account_names import normalize_account_mapping, normalize_account_name
+    from account_names import is_fbs_stocks_disabled, normalize_account_mapping, normalize_account_name
     from article_state import ARTICLE_STATE_MESSAGES, ArticleState
 
 
@@ -94,6 +94,7 @@ class Settings:
     TOKENS_FILE_NAME: str = os.getenv("TOKENS_FILE_NAME", "tokens.json")
     PC_SHEET: str = os.getenv("PC_SHEET")
     PC_SPREADSHEET: str = os.getenv("PC_SPREADSHEET")
+    FBS_STOCKS_DISABLED_ACCOUNTS: str = os.getenv("FBS_STOCKS_DISABLED_ACCOUNTS", "")
 
 
 @dataclass
@@ -2044,8 +2045,22 @@ class ServiceGoogleSheet:
 
                 account_updates.extend(int(nm_ids_str) for nm_ids_str in valid_data_result.keys())
 
-            if (account_key in edit_data_from_table["qty_edit_data"] and
-                    (len(edit_data_from_table["qty_edit_data"][account_key]["stocks"]) > 0 and quantity_edit_status)):
+            qty_edit_requested = (
+                account_key in edit_data_from_table["qty_edit_data"]
+                and len(edit_data_from_table["qty_edit_data"][account_key]["stocks"]) > 0
+                and quantity_edit_status
+            )
+            if qty_edit_requested and is_fbs_stocks_disabled(
+                account, settings.FBS_STOCKS_DISABLED_ACCOUNTS
+            ):
+                logger.info(
+                    "Изменение FBS-остатков для кабинета {} отключено настройкой",
+                    account,
+                )
+
+            if qty_edit_requested and not is_fbs_stocks_disabled(
+                account, settings.FBS_STOCKS_DISABLED_ACCOUNTS
+            ):
                 qty_edit_data = edit_data_from_table["qty_edit_data"][account_key]
                 valid_qty_pairs = [
                     (stock, nm_id)

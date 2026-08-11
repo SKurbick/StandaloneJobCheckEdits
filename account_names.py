@@ -1,6 +1,7 @@
 """Canonical WB account keys used only for cross-source matching."""
 
 from collections.abc import Mapping
+import os
 import warnings
 from typing import Any
 
@@ -8,6 +9,21 @@ from typing import Any
 def normalize_account_name(account: str) -> str:
     """Normalize whitespace and case for a WB account dictionary key."""
     return str(account).strip().capitalize()
+
+
+def is_fbs_stocks_disabled(account: str, disabled_accounts: str | None = None) -> bool:
+    """Return whether FBS stock writes are disabled for an account."""
+    raw_value = (
+        os.getenv("FBS_STOCKS_DISABLED_ACCOUNTS", "")
+        if disabled_accounts is None
+        else disabled_accounts
+    )
+    configured_accounts = {
+        normalize_account_name(item)
+        for item in raw_value.split(",")
+        if item.strip()
+    }
+    return "*" in configured_accounts or normalize_account_name(account) in configured_accounts
 
 
 def normalize_account_mapping(
